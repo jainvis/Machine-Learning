@@ -1,0 +1,358 @@
+---
+title: "Auto Miles-per-Gallon Predictive Modeling"
+author: "Akshay Sharma & Vishesh Jain"
+date: "11 June 2018"
+output:
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+    toc: no
+    toc_depth: 3
+  word_document:
+    toc: no
+    toc_depth: '3'
+linkcolor: blue
+subtitle: 'Phase II: Data Modelling'
+documentclass: article
+---
+\newpage
+
+\tableofcontents
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# INTRODUCTION
+
+The objective of this project is to build a model to predict miles-per-gallon of a car. The data set was sourced from the [UCI Machine Learning Repository](http://archive.ics.uci.edu/ml/machine-learning-databases/auto-mpg/). This project has two phases. In Phase I, we performed data cleaning, transformation & summarization and produced a data set for modeling. In Phase II, we have built three regression (error-based) models on the processed data.
+
+This Report later contains Feature Selection, Hyper Parameter Tuning, Data Modeling and Evaluation.
+
+# METHODOLOGY
+
+We considered three regression models - Kernel SVM, Lasso and K-Nearest Neighbour Regression (KKNN) and earth (multivariate adaptive regression splines). Each model was trained to make transformed miles-per-gallon prediction to check the performance based on Mean Square Error, Mean absolute Error and R-square values.
+The data set was split into 75% as training set and 25% as test set. For fine tuning process, we ran a three-fold cross validation on each model.
+
+Next, for each model we performed feature selection and tuned the hyper-parameters. Using the features selected and hyper-parameter values we made predictions on the test data. During model training (feature selection and Hyper-Parameter tuning), we relied on Mean Squared Error. In addition to MSE, we also used MAE and R-Sqauare values to evaluate models' performance. The feature selection was done using `spFSR` package and modeling was done using `mlr' package.
+
+# R-LIBRARY
+
+Following packages are used in the given analysis:
+
+```{r warning=FALSE, results='hide'}
+
+library(caret)
+library(mlr)
+library(mlbench)
+library(tidyverse)
+library(spFSR)
+library(dplyr)
+
+
+```
+
+# DATA SPLIT
+
+Prior to any activity of data modeling, we will first split the data into test and training sets.
+
+```{r}
+ampg.2 <- read.csv("ampg_transform.csv")
+data <- ampg.2[,-c(1,9,10)]
+data$cylinders<- as.factor(data$cylinders)
+data$origin<- as.factor(data$origin)
+data$modelYear<- as.factor(data$modelYear)
+
+intrain<-createDataPartition(y=data$tmpg,p=0.75,list=FALSE)
+train<-data[intrain,]
+test<-data[-intrain,]
+
+
+Y.train <- train %>% pull(tmpg) 
+X.train <- train[,-8]
+
+Y.test <- test %>% pull(tmpg) 
+X.test <- test[,-8]
+
+new.data = cbind(X.train, Y.train)
+my.task <- makeRegrTask(data = new.data, target = "Y.train")
+
+```
+
+# FEATURE SELECTION
+
+In this section, we used `spFSR` package to produce feature ranking and perform feature selection using each model.
+
+Just a look at model performance through various importance criteria using all features.
+
+```{r}
+mFV <- generateFilterValuesData(my.task, 
+                                method = c('randomForest.importance', 
+                                           'information.gain',
+                                           'chi.squared'))
+plotFilterValues(mFV) 
+
+my.measure <- mse
+
+my.wrapper1 <- makeLearner("regr.ksvm", id = 'ksvm')
+my.wrapper2 <- makeLearner("regr.earth", id = 'erth')
+my.wrapper3 <- makeLearner("regr.kknn", id = 'kknn')
+
+```
+
+## Kernel - SVM 
+
+```{r results='hide'}
+# Feature selection for ksvm
+spsaMod.ksvm <- spFeatureSelection(task = my.task,
+                                   wrapper = my.wrapper1, 
+                                   num.features.selected = 0, 
+                                   measure = my.measure)
+```
+
+```{r}
+getImportance(spsaMod.ksvm)
+plotImportance(spsaMod.ksvm)
+X.ksvm <- X.train[ , which(names(X.train) %in% as.vector(spsaMod.ksvm$features))]
+
+print("Selected features are: ")
+print(spsaMod.ksvm$features)
+```
+
+
+## Earth
+
+```{r results='hide'}
+
+spsaMod.erth <- spFeatureSelection(task = my.task,
+                                   wrapper = my.wrapper2, 
+                                   num.features.selected = 0, 
+                                   measure = my.measure)
+```
+
+```{r}
+getImportance(spsaMod.erth)
+plotImportance(spsaMod.erth)
+X.erth <- X.train[ , which(names(X.train) %in% as.vector(spsaMod.erth$features))]
+
+
+print("Selected features are: ")
+print(spsaMod.erth$features)
+```
+
+
+## KKNN
+
+```{r results='hide'}
+spsaMod.kknn <- spFeatureSelection(task = my.task,
+                                  wrapper = my.wrapper3, 
+                                  num.features.selected = 0, 
+                                  measure = my.measure)
+```
+
+```{r}
+
+getImportance(spsaMod.kknn)
+plotImportance(spsaMod.kknn)
+X.kknn <- X.train[ , which(names(X.train) %in% as.vector(spsaMod.kknn$features))]
+
+print("Selected features are: ")
+print(spsaMod.kknn$features)
+
+```
+
+
+# HYPER-PARRAMETER TUNING
+
+Setting the re-sampling description:
+
+```{r}
+my.rdesc <- makeResampleDesc("RepCV", folds = 3, reps = 3, stratify = F)
+```
+
+## Kernel SVM
+
+- We are going to tune the sigma and C parameter of kernel SVM and use grid search to search for the best values for these parameters. 
+
+```{r}
+data.ksvm = cbind(X.ksvm,Y.train)
+my.task.ksvm <- makeRegrTask(id = "ksvm", data = data.ksvm, target = "Y.train")
+ps.ksvm = makeParamSet(makeNumericParam("C", lower = -12, upper = 12, trafo = function(x) 2^x),
+                       makeNumericParam("sigma", lower = -12, upper = 12, trafo = function(x) 2^x))
+ctrl.ksvm = makeTuneControlGrid()
+set.seed(123, kind = "L'Ecuyer-CMRG")
+res.ksvm = tuneParams("regr.ksvm", task = my.task.ksvm, resampling = my.rdesc,
+                      par.set = ps.ksvm, control = ctrl.ksvm, show.info = F)
+```
+
+```{r}
+data.ksvm = generateHyperParsEffectData(res.ksvm)
+plt.ksvm = plotHyperParsEffect(data.ksvm, x = "C", y = "mse.test.mean", z = 'sigma')
+plt.ksvm + ylab("Mean Squared Error")
+```
+
+Based on above results, we can see that the tuned parameters are :
+
+*C=4.1e+03; sigma=0.000244 : mse.test.mean=0.0443031*
+
+## EARTH
+
+- We are going to tune the degree of interactions and nprune i.e. number of parameters to be pruned of Earth algorithm and use grid search to search for the best values for these parameters. 
+
+```{r results='hide'}
+
+data.erth = cbind(X.erth,Y.train)
+my.task.erth <- makeRegrTask(id = "earth", data = data.erth, target = "Y.train")
+ps.erth = makeParamSet(makeIntegerParam("nprune", lower = 3, upper = 15),
+                       makeIntegerParam("degree", lower = 1, upper = 5))
+ctrl.erth = makeTuneControlGrid()
+set.seed(123, kind = "L'Ecuyer-CMRG")
+res.erth = tuneParams("regr.earth", task = my.task.erth, resampling = my.rdesc,
+                      par.set = ps.erth, control = ctrl.erth, show.info = F)
+
+```
+
+```{r}
+data.erth = generateHyperParsEffectData(res.erth)
+plt.erth = plotHyperParsEffect(data.erth, x = "nprune", y = "mse.test.mean", z = 'degree')
+plt.erth + ylab("Mean Squared Error")
+
+```
+
+Based on above graph, we obtained the following result for the parameter:
+
+*nprune=15; degree=1 : mse.test.mean=0.0482361*
+
+## KKNN
+
+- We are going to tune the k parameter i.e. number of neighbours to be taken into account for k nearest neighbour regression technique and used grid search to search for the best values of k parameter. 
+
+```{r results='hide'}
+data.kknn = cbind(X.kknn,Y.train)
+my.task.kknn <- makeRegrTask(id = "kknn", data = data.kknn, target = "Y.train")
+ps.kknn = makeParamSet(makeNumericParam("k",lower = 2,upper = 20))
+ctrl.kknn = makeTuneControlGrid()
+set.seed(123, kind = "L'Ecuyer-CMRG")
+res.kknn = tuneParams("regr.kknn", task = my.task.kknn, resampling = my.rdesc,
+                     par.set = ps.kknn, control = ctrl.kknn, show.info = F)
+```
+
+```{r}
+data.kknn = generateHyperParsEffectData(res.kknn)
+plt = plotHyperParsEffect(data.kknn, x = "k", y = "mse.test.mean")
+plt + ylab("Mean Squared Error")
+```
+
+Based on above graphs, we found the following values of tuned parameters:
+
+*k = 6 : mse.test.mean=0.052*
+
+# MODEL TRAINING
+
+In thi section we will train the model based on the features selected and tuned hyper-parameters.
+
+## Kernel SVM
+
+```{r}
+
+lrn.ksvm = setHyperPars(makeLearner("regr.ksvm"), par.vals = res.ksvm$x)
+model.ksvm = mlr::train(lrn.ksvm, my.task.ksvm)
+
+# Cross-Validation
+set.seed(123, kind = "L'Ecuyer-CMRG")
+repcv.ksvm <- resample(lrn.ksvm, 
+                       my.task.ksvm, 
+                       my.rdesc,
+                       measures = my.measure)
+
+```
+
+## Earth
+
+```{r}
+
+lrn.erth = setHyperPars(makeLearner("regr.earth"), par.vals = res.erth$x)
+model.earth = mlr::train(lrn.erth, my.task.erth)
+
+# Cross-Validation
+repcv.erth <- resample(lrn.erth, 
+                       my.task.erth, 
+                       my.rdesc,
+                       measures = my.measure)
+
+```
+
+## KKNN
+
+```{r}
+
+lrn.kknn = setHyperPars(makeLearner("regr.kknn"), par.vals = res.kknn$x)
+model.kknn = mlr::train(lrn.kknn, my.task.kknn)
+
+# Cross-Validation
+repcv.kknn <- resample(lrn.kknn, 
+                      my.task.kknn, 
+                      my.rdesc,
+                      measures = my.measure)
+
+```
+
+## Model Comparison - CV
+
+Comparing the mean square error of all models before evaluation.
+
+```{r}
+
+result.ksvm.mean <- mean(repcv.ksvm$measures.test[[2]])
+result.erth.mean <- mean(repcv.erth$measures.test[[2]])
+result.kknn.mean <- mean(repcv.kknn$measures.test[[2]])
+
+Model.Used <- c('ksvm','earth','kknn')
+Model.Results <-c(result.ksvm.mean, result.erth.mean, result.kknn.mean)
+print(data.frame(Model.Used,Model.Results))
+
+```
+
+Prior to evaluation we can see that all algorithms are performing well however, we can clearly see that KKNN is the winner with the lowest Mean Squared Error value.
+
+We will proceed with evaluation of all three models.
+
+# EVALUATION
+
+In this section, we will use the trained models to predict target levels on the test data. Then we will use the observed and predicted values to calculate evaluation parameters.
+
+```{r}
+
+data.pred = cbind(X.test,Y.test)
+colnames(data.pred)[8]<-"Y.train"
+
+pred = predict(model.ksvm, newdata = data.pred)
+print("-----------------------KSVM Evaluation------------------")
+performance(pred, measures = list(mse, mae, sse, rsq, expvar))
+
+pred = predict(model.earth, newdata = data.pred)
+print("-----------------------Earth Evaluation------------------")
+performance(pred, measures = list(mse, mae, sse, rsq, expvar))
+
+pred = predict(model.kknn, newdata = data.pred)
+print("-----------------------kknn Evaluation------------------")
+performance(pred, measures = list(mse, mae, sse, rsq, expvar))
+
+```
+
+- Lowest Mean Sqaured Error, Mean Absolute Error, Sum of Sqaure Error is observed in KSVM
+- Maximum R-Square Value is observed in Earth
+- Maximum explained variance is given by Earth algorithm
+  
+# DISCUSSION
+
+The previous section showed evaluation of each regression model. We can see that all the models are performing well, as there is only ~1% error in all models.
+ALthough we observed that the explained variance is higher in Earth model, but, KSVM outperformed the other two models when mse, mae, sse and rsq values were taken into account.
+
+# CONCLUSION
+
+Among the three regression models, KSVM produced best performance in predicting miles-per-gallon of a car. Using random sampling, we split the data into 75% train and 25% test data. We also performed feature selection and hyper-parameter tuning for each regression model. However, the explained variance is high in earth model, taking over-fitting into consideration, we would recommend KSVM.
+
+
